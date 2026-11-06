@@ -295,6 +295,8 @@ func (h *Handler) handleStatus(ctx context.Context, openID, msgID string) {
 		sb.WriteString(fmt.Sprintf(" [%d] %s (%s)\n", i+1, sec, secStatus))
 	}
 
+	sb.WriteString("\n------------------------\n")
+	sb.WriteString(accountHealthFromRuns(ncmmHome))
 	h.replyText(ctx, openID, sb.String(), msgID)
 }
 
@@ -1420,4 +1422,68 @@ func (h *Handler) handleTaskStatus(ctx context.Context, openID, msgID string) {
 	}
 	resp += progress
 	h.replyText(ctx, openID, resp, msgID)
+}
+
+
+// ponytail: 复用 WebUI 账号健康度的数据源（runs/*.json 的 rewards），免认证、免加密
+func accountHealthFromRuns(ncmmHome string) string {
+	dir := filepath.Join(ncmmHome, "log", "runs")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "⚠️ 无法读取任务记录: " + err.Error()
+	}
+	bestAt := ""
+	best := struct {
+		UID, Nickname, Identity string
+		Valid                   bool
+	}{}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var run struct {
+			StartedAt string `json:"startedAt"`
+			Rewards   []struct {
+				UID         string `json:"uid"`
+				Nickname    string `json:"nickname"`
+				Identity    string `json:"identity"`
+				CookieValid bool   `json:"cookieValid"`
+				CookieKnown bool   `json:"cookieKnown"`
+			} `json:"rewards"`
+		}
+		if json.Unmarshal(b, &run) != nil || run.StartedAt <= bestAt {
+			continue
+		}
+		for _, w := range run.Rewards {
+			if !w.CookieKnown {
+				continue
+			}
+			bestAt = run.StartedAt
+			best.UID, best.Nickname, best.Identity, best.Valid = w.UID, w.Nickname, w.Identity, w.CookieValid
+			break
+		}
+	}
+	if bestAt == "" {
+		return "ℹ️ 未知（暂无带账号信息的任务记录）"
+	}
+	valid := "❌ 已失效"
+	if best.Valid {
+		valid = "✅ 有效"
+	}
+	when := bestAt
+	if t, err := time.Parse(time.RFC3339Nano, bestAt); err == nil {
+		when = t.Format("01-02 15:04")
+	}
+	out := "登录态: " + valid + "  (数据来自 " + when + " 的任务)"
+	if best.Nickname != "" {
+		out += "\n昵称: " + best.Nickname + " (UID " + best.UID + ")"
+	}
+	if best.Identity != "" {
+		out += "\n身份: " + best.Identity
+	}
+	return out
 }
