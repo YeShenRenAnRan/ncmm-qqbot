@@ -1,0 +1,67 @@
+{
+  "name": "qqbot",
+  "type": "daemon",
+  "title": "QQ机器人助手",
+  "version": "1.0.4",
+  "description": "基于腾讯官方 QQ 机器人 API v2 的常驻伴生插件，随 ncmm web 自动启停，支持 QQ 私聊自动识别更新 Cookie、扫码登录与通知中继推送",
+  "author": "crossgg",
+  "recommendedCron": "",
+  "params": [
+    {
+      "name": "auto_notify",
+      "label": "开启系统通知推送",
+      "type": "boolean",
+      "default": true,
+      "description": "开启后自动在宿主 notify.yaml 中配置并启用 Webhook 通知渠道（端口与下方服务端口一致）"
+    },
+    {
+      "name": "app_id",
+      "label": "QQ机器人 AppID",
+      "type": "string",
+      "default": "",
+      "description": "腾讯 QQ 开放平台申请的机器人 AppID"
+    },
+    {
+      "name": "client_secret",
+      "label": "AppSecret / ClientSecret",
+      "type": "string",
+      "default": "",
+      "description": "机器人 AppSecret (ClientSecret)"
+    },
+    {
+      "name": "admin_openid",
+      "label": "管理员 OpenID",
+      "type": "string",
+      "default": "",
+      "description": "QQ 私聊中发送 /myid 即可快速获取并填入"
+    },
+    {
+      "name": "port",
+      "label": "本地中继端口",
+      "type": "number",
+      "default": 5606,
+      "description": "本地回环内部通信端口（默认 127.0.0.1:5606，无需对外映射）"
+    },
+    {
+      "name": "host",
+      "label": "监听地址",
+      "type": "string",
+      "default": "127.0.0.1",
+      "description": "监听地址（默认 127.0.0.1 仅限本机；若需局域网访问独立面板可填 0.0.0.0）"
+    },
+    {
+      "name": "ncmm_exe",
+      "label": "宿主程序路径 (ncmm_exe)",
+      "type": "string",
+      "default": "",
+      "description": "ncmm 宿主可执行程序路径（留空将自动根据环境变量、PATH及当前环境多级探测）"
+    },
+    {
+      "name": "ncmm_home",
+      "label": "宿主数据主目录 (ncmm_home)",
+      "type": "string",
+      "default": "",
+      "description": "ncmm 宿主配置与数据主目录（留空自动探测）"
+    }
+  ]
+}
