@@ -1344,7 +1344,6 @@ type taskRunRecord struct {
 	Error      string `json:"error"`
 }
 
-var playidsProgressRe = regexp.MustCompile(`\[playids\] [^：]+：第(\d+)/(\d+)首`)
 
 func (h *Handler) handleTaskStatus(ctx context.Context, openID, msgID string) {
 	home := h.cfgGetter.Get().NCMMHome
@@ -1352,138 +1351,210 @@ func (h *Handler) handleTaskStatus(ctx context.Context, openID, msgID string) {
 		h.replyText(ctx, openID, "⚠️ 未配置 ncmm_home，无法读取任务记录。", msgID)
 		return
 	}
-	runsDir := filepath.Join(home, "log", "runs")
-	entries, err := os.ReadDir(runsDir)
-	if err != nil {
-		h.replyText(ctx, openID, "⚠️ 读取任务记录失败: "+err.Error(), msgID)
-		return
-	}
-	latest := ""
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") && e.Name() > latest {
-			latest = e.Name()
-		}
-	}
-	if latest == "" {
-		h.replyText(ctx, openID, "ℹ️ 暂无任务运行记录。", msgID)
-		return
-	}
-	b, err := os.ReadFile(filepath.Join(runsDir, latest))
-	if err != nil {
-		h.replyText(ctx, openID, "⚠️ 读取 "+latest+" 失败: "+err.Error(), msgID)
-		return
-	}
-	var r taskRunRecord
-	if err := json.Unmarshal(b, &r); err != nil {
-		h.replyText(ctx, openID, "⚠️ 解析任务记录失败: "+err.Error(), msgID)
-		return
-	}
-	icon := map[string]string{
-		"running": "⏳ 运行中", "success": "✅ 已完成", "failed": "❌ 失败",
-		"skipped": "⏭️ 跳过", "interrupted": "⚠️ 中断", "stopped": "🛑 已停止",
-	}[r.Status]
-	if icon == "" {
-		icon = r.Status
-	}
-	start, _ := time.Parse(time.RFC3339Nano, r.StartedAt)
-	extra := ""
-	if r.Status == "running" && !start.IsZero() {
-		extra = fmt.Sprintf("，已运行 %v", time.Since(start).Round(time.Second))
-	} else if r.FinishedAt != "" {
-		if fin, err := time.Parse(time.RFC3339Nano, r.FinishedAt); err == nil && !start.IsZero() {
-			extra = fmt.Sprintf("，耗时 %v", fin.Sub(start).Round(time.Second))
-		}
-	}
+	logInfo := readNcmLogSummary(home)
 	progress := ""
-	logPath := filepath.Join(home, "log", "ncm.log")
-	if f, err := os.Open(logPath); err == nil {
-		defer f.Close()
-		if st, err := f.Stat(); err == nil && st.Size() > 65536 {
-			f.Seek(-65536, io.SeekEnd)
+	if logInfo.Progress != "" {
+		progress = fmt.Sprintf("\n🎵 刷歌进度: %s 首", logInfo.Progress)
+	}
+	if r, ok := latestTaskRun(home); ok {
+		icon := map[string]string{
+			"running": "⏳ 运行中", "success": "✅ 已完成", "failed": "❌ 失败",
+			"skipped": "⏭️ 跳过", "interrupted": "⚠️ 中断", "stopped": "🛑 已停止",
+		}[r.Status]
+		if icon == "" {
+			icon = r.Status
 		}
-		if tailBytes, err := io.ReadAll(f); err == nil {
-			lines := strings.Split(string(tailBytes), "\n")
-			for i := len(lines) - 1; i >= 0 && i >= len(lines)-300; i-- {
-				if m := playidsProgressRe.FindStringSubmatch(lines[i]); m != nil {
-					progress = fmt.Sprintf("\n🎵 刷歌进度: %s/%s 首", m[1], m[2])
-					break
-				}
+		start, _ := time.Parse(time.RFC3339Nano, r.StartedAt)
+		extra := ""
+		if r.Status == "running" && !start.IsZero() {
+			extra = fmt.Sprintf("，已运行 %v", time.Since(start).Round(time.Second))
+		} else if r.FinishedAt != "" {
+			if fin, err := time.Parse(time.RFC3339Nano, r.FinishedAt); err == nil && !start.IsZero() {
+				extra = fmt.Sprintf("，耗时 %v", fin.Sub(start).Round(time.Second))
 			}
 		}
+		startStr := r.StartedAt
+		if !start.IsZero() {
+			startStr = start.Format("01-02 15:04:05")
+		}
+		resp := fmt.Sprintf("📋 定时任务状态\n任务: %s (%s)\n状态: %s%s\n开始: %s\n记录: %s",
+			r.JobName, r.Command, icon, extra, startStr, latestRunName(home))
+		if r.Error != "" {
+			resp += "\n备注: " + r.Error
+		}
+		h.replyText(ctx, openID, resp+progress, msgID)
+		return
 	}
-	startStr := r.StartedAt
-	if !start.IsZero() {
-		startStr = start.Format("01-02 15:04:05")
+	// ponytail: 外部 cron 模式没有 runs 记录, 用日志最后活动时间兜底(10 分钟阈值, 卡死会误判)
+	state := "⏹ 空闲"
+	if logRunning(logInfo.LastAt) {
+		state = "⏳ 运行中"
 	}
-	resp := fmt.Sprintf("📋 定时任务状态\n任务: %s (%s)\n状态: %s%s\n开始: %s\n记录: %s",
-		r.JobName, r.Command, icon, extra, startStr, latest)
-	if r.Error != "" {
-		resp += "\n备注: " + r.Error
+	when := logInfo.LastAt
+	if t, err := time.Parse(time.RFC3339Nano, logInfo.LastAt); err == nil {
+		when = t.Format("01-02 15:04:05")
 	}
-	resp += progress
-	h.replyText(ctx, openID, resp, msgID)
+	resp := fmt.Sprintf("📋 定时任务状态\n状态: %s\n最后日志: %s\n来源: ncm.log", state, when)
+	if logInfo.StartAt != "" {
+		if t, err := time.Parse(time.RFC3339Nano, logInfo.StartAt); err == nil {
+			resp += "\n开始: " + t.Format("01-02 15:04:05")
+		}
+	}
+	h.replyText(ctx, openID, resp+progress, msgID)
 }
+
 
 
 // ponytail: 复用 WebUI 账号健康度的数据源（runs/*.json 的 rewards），免认证、免加密
 func accountHealthFromRuns(ncmmHome string) string {
 	dir := filepath.Join(ncmmHome, "log", "runs")
 	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return "⚠️ 无法读取任务记录: " + err.Error()
-	}
-	bestAt := ""
-	best := struct {
-		UID, Nickname, Identity string
-		Valid                   bool
-	}{}
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
-		if err != nil {
-			continue
-		}
-		var run struct {
-			StartedAt string `json:"startedAt"`
-			Rewards   []struct {
-				UID         string `json:"uid"`
-				Nickname    string `json:"nickname"`
-				Identity    string `json:"identity"`
-				CookieValid bool   `json:"cookieValid"`
-				CookieKnown bool   `json:"cookieKnown"`
-			} `json:"rewards"`
-		}
-		if json.Unmarshal(b, &run) != nil || run.StartedAt <= bestAt {
-			continue
-		}
-		for _, w := range run.Rewards {
-			if !w.CookieKnown {
+	if err == nil {
+		bestAt := ""
+		best := struct {
+			UID, Nickname, Identity string
+			Valid                   bool
+		}{}
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 				continue
 			}
-			bestAt = run.StartedAt
-			best.UID, best.Nickname, best.Identity, best.Valid = w.UID, w.Nickname, w.Identity, w.CookieValid
-			break
+			b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+			if err != nil {
+				continue
+			}
+			var run struct {
+				StartedAt string `json:"startedAt"`
+				Rewards   []struct {
+					UID         string `json:"uid"`
+					Nickname    string `json:"nickname"`
+					Identity    string `json:"identity"`
+					CookieValid bool   `json:"cookieValid"`
+					CookieKnown bool   `json:"cookieKnown"`
+				} `json:"rewards"`
+			}
+			if json.Unmarshal(b, &run) != nil || run.StartedAt <= bestAt {
+				continue
+			}
+			for _, w := range run.Rewards {
+				if !w.CookieKnown {
+					continue
+				}
+				bestAt = run.StartedAt
+				best.UID, best.Nickname, best.Identity, best.Valid = w.UID, w.Nickname, w.Identity, w.CookieValid
+				break
+			}
+		}
+		if bestAt != "" {
+			valid := "❌ 已失效"
+			if best.Valid {
+				valid = "✅ 有效"
+			}
+			when := bestAt
+			if t, err := time.Parse(time.RFC3339Nano, bestAt); err == nil {
+				when = t.Format("01-02 15:04")
+			}
+			out := "登录态: " + valid + "  (数据来自 " + when + " 的任务)"
+			if best.Nickname != "" {
+				out += "\n昵称: " + best.Nickname + " (UID " + best.UID + ")"
+			}
+			if best.Identity != "" {
+				out += "\n身份: " + best.Identity
+			}
+			return out
 		}
 	}
-	if bestAt == "" {
-		return "ℹ️ 未知（暂无带账号信息的任务记录）"
+	// ponytail: 无 runs.rewards 时退化为日志间接推断(不是真校验登录态)
+	s := readNcmLogSummary(ncmmHome)
+	valid := "✅ 有效(最近任务无报错)"
+	if s.ErrSample != "" {
+		valid = "❌ 疑似失效"
 	}
-	valid := "❌ 已失效"
-	if best.Valid {
-		valid = "✅ 有效"
+	out := "登录态: " + valid + "  (推断自 ncm.log)"
+	if s.Nickname != "" {
+		out += "\n昵称: " + s.Nickname + " (UID " + s.UID + ")"
 	}
-	when := bestAt
-	if t, err := time.Parse(time.RFC3339Nano, bestAt); err == nil {
-		when = t.Format("01-02 15:04")
-	}
-	out := "登录态: " + valid + "  (数据来自 " + when + " 的任务)"
-	if best.Nickname != "" {
-		out += "\n昵称: " + best.Nickname + " (UID " + best.UID + ")"
-	}
-	if best.Identity != "" {
-		out += "\n身份: " + best.Identity
+	if t, err := time.Parse(time.RFC3339Nano, s.LastAt); err == nil {
+		out += "\n最后日志: " + t.Format("01-02 15:04")
 	}
 	return out
+}
+
+
+
+// ponytail: 纯 CLI/外部 cron 模式没有 runs 记录，流式扫 ncm.log 兜底；web 在时仍优先用 runs
+type ncmLogSummary struct {
+	LastAt, StartAt, UID, Nickname, Progress, ErrSample string
+}
+
+var (
+	reLogTime    = regexp.MustCompile(`time=(\S+)`)
+	reLogAccount = regexp.MustCompile(`当前账号：uid=(\d+) 昵称="([^"]+)"`)
+	reLogStart   = regexp.MustCompile(`>>>>>> 开始为账号 .*执行模拟播放`)
+	reLogProg    = regexp.MustCompile(`本首结果：第(\d+)/(\d+)首，成功`)
+	reLogBad     = regexp.MustCompile(`level=ERROR|未登录|8821|code=301|登录失效|Cookie.*失效`)
+)
+
+func readNcmLogSummary(ncmmHome string) ncmLogSummary {
+	var out ncmLogSummary
+	f, err := os.Open(filepath.Join(ncmmHome, "log", "ncm.log"))
+	if err != nil {
+		return out
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64*1024), 1024*1024)
+	for sc.Scan() {
+		line := strings.ReplaceAll(sc.Text(), `\"`, `"`) // slog 转义了 msg 内的引号
+		if m := reLogTime.FindStringSubmatch(line); m != nil {
+			out.LastAt = m[1]
+		}
+		if m := reLogAccount.FindStringSubmatch(line); m != nil {
+			out.UID, out.Nickname = m[1], m[2]
+		}
+		if reLogStart.MatchString(line) {
+			out.StartAt = out.LastAt
+			out.ErrSample = "" // 每轮重置, 旧错误不带到新任务
+		}
+		if m := reLogProg.FindStringSubmatch(line); m != nil {
+			out.Progress = m[1] + "/" + m[2]
+		}
+		if reLogBad.MatchString(line) {
+			out.ErrSample = line
+		}
+	}
+	return out
+}
+
+func logRunning(lastAt string) bool {
+	t, err := time.Parse(time.RFC3339Nano, lastAt)
+	return err == nil && time.Since(t) < 10*time.Minute
+}
+
+func latestRunName(ncmmHome string) string {
+	entries, _ := os.ReadDir(filepath.Join(ncmmHome, "log", "runs"))
+	latest := ""
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") && e.Name() > latest {
+			latest = e.Name()
+		}
+	}
+	return latest
+}
+
+func latestTaskRun(ncmmHome string) (taskRunRecord, bool) {
+	var r taskRunRecord
+	name := latestRunName(ncmmHome)
+	if name == "" {
+		return r, false
+	}
+	path := filepath.Join(ncmmHome, "log", "runs", name)
+	b, err := os.ReadFile(path)
+	if err != nil || json.Unmarshal(b, &r) != nil {
+		return r, false
+	}
+	if st, err := os.Stat(path); err == nil && time.Since(st.ModTime()) > 26*time.Hour {
+		return r, false // 调度器已停, 旧记录不再可信
+	}
+	return r, true
 }
